@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Radeon Morse Transmitter</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      background: radial-gradient(circle at top, #ff4655 0, #1a1a1a 45%, #000 100%);
+      color: #f5f5f5;
+      min-height: 100vh;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      background: rgba(10, 10, 10, 0.9);
+      border: 1px solid #ff4655;
+      border-radius: 12px;
+      padding: 24px;
+      max-width: 600px;
+      width: 100%;
+      box-shadow: 0 0 30px rgba(255, 70, 85, 0.4);
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 1.6rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    label {
+      font-size: 0.9rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #ff9aa7;
+    }
+    textarea {
+      width: 100%;
+      height: 80px;
+      margin: 8px 0 16px;
+      padding: 8px;
+      border-radius: 6px;
+      border: 1px solid #444;
+      background: #111;
+      color: #f5f5f5;
+      resize: vertical;
+    }
+    .row {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .row > div {
+      flex: 1;
+      min-width: 120px;
+    }
+    input[type="number"] {
+      width: 100%;
+      padding: 6px 8px;
+      border-radius: 6px;
+      border: 1px solid #444;
+      background: #111;
+      color: #f5f5f5;
+    }
+    button {
+      background: #ff4655;
+      border: none;
+      color: #fff;
+      padding: 10px 18px;
+      border-radius: 999px;
+      cursor: pointer;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-right: 8px;
+    }
+    button:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
+    .morse-output {
+      margin-top: 16px;
+      padding: 10px;
+      border-radius: 6px;
+      background: #111;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.95rem;
+      word-wrap: break-word;
+      border: 1px solid #333;
+    }
+    .status {
+      margin-top: 8px;
+      font-size: 0.85rem;
+      color: #ff9aa7;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Radeon Morse Transmitter</h1>
+    <label for="text">Message</label>
+    <textarea id="text" placeholder="Type your message to transmit in Morse..."></textarea>
+
+    <div class="row">
+      <div>
+        <label for="freq">Tone frequency (Hz)</label>
+        <input id="freq" type="number" value="800" min="100" max="5000" />
+      </div>
+      <div>
+        <label for="wpm">Speed (WPM approx)</label>
+        <input id="wpm" type="number" value="18" min="5" max="40" />
+      </div>
+    </div>
+
+    <button id="play">Transmit</button>
+    <button id="stop" disabled>Stop</button>
+
+    <div class="morse-output" id="morse"></div>
+    <div class="status" id="status">Idle.</div>
+  </div>
+
+  <script>
+    const textInput = document.getElementById('text');
+    const freqInput = document.getElementById('freq');
+    const wpmInput = document.getElementById('wpm');
+    const playBtn = document.getElementById('play');
+    const stopBtn = document.getElementById('stop');
+    const morseDiv = document.getElementById('morse');
+    const statusDiv = document.getElementById('status');
+
+    const MORSE_MAP = {
+      'A': '.-',    'B': '-...',  'C': '-.-.',  'D': '-..',
+      'E': '.',     'F': '..-.',  'G': '--.',   'H': '....',
+      'I': '..',    'J': '.---',  'K': '-.-',   'L': '.-..',
+      'M': '--',    'N': '-.',    'O': '---',   'P': '.--.',
+      'Q': '--.-',  'R': '.-.',   'S': '...',   'T': '-',
+      'U': '..-',   'V': '...-',  'W': '.--',   'X': '-..-',
+      'Y': '-.--',  'Z': '--..',
+      '0': '-----', '1': '.----', '2': '..---', '3': '...--',
+      '4': '....-', '5': '.....', '6': '-....', '7': '--...',
+      '8': '---..', '9': '----.',
+      '.': '.-.-.-', ',': '--..--', '?': '..--..', '/': '-..-.',
+      '@': '.--.-.', '-': '-....-', '(': '-.--.', ')': '-.--.-'
+    };
+
+    let audioCtx = null;
+    let stopRequested = false;
+
+    function textToMorse(text) {
+      const words = text.toUpperCase().trim().split(/\s+/);
+      const morseWords = words.map(word => {
+        return word.split('').map(ch => MORSE_MAP[ch] || '').filter(Boolean).join(' ');
+      });
+      return morseWords.join('   '); // 3 spaces between words
+    }
+
+    function wpmToUnitMs(wpm) {
+      // Standard PARIS timing: dot length (seconds) ≈ 1.2 / WPM
+      const dotSeconds = 1.2 / wpm;
+      return dotSeconds * 1000;
+    }
+
+    async function playMorse(morse, freq, wpm) {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const unit = wpmToUnitMs(wpm); // dot length
+      const dash = unit * 3;
+      const intraCharGap = unit;     // between dots/dashes
+      const interCharGap = unit * 3; // between letters
+      const wordGap = unit * 7;      // between words
+
+      function playTone(durationMs) {
+        return new Promise(resolve => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = 'square';
+          osc.frequency.value = freq;
+          gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.4, audioCtx.currentTime + 0.01);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start();
+          setTimeout(() => {
+            gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.01);
+            setTimeout(() => {
+              osc.stop();
+              resolve();
+            }, 20);
+          }, durationMs);
+        });
+      }
+
+      function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+      }
+
+      const words = morse.split('   '); // 3 spaces between words
+      for (let w = 0; w < words.length; w++) {
+        if (stopRequested) break;
+        const letters = words[w].split(' ');
+        for (let l = 0; l < letters.length; l++) {
+          if (stopRequested) break;
+          const letter = letters[l];
+          for (let i = 0; i < letter.length; i++) {
+            if (stopRequested) break;
+            const symbol = letter[i];
+            if (symbol === '.') {
+              await playTone(unit);
+            } else if (symbol === '-') {
+              await playTone(dash);
+            }
+            if (i < letter.length - 1) {
+              await sleep(intraCharGap);
+            }
+          }
+          if (l < letters.length - 1) {
+            await sleep(interCharGap);
+          }
+        }
+        if (w < words.length - 1) {
+          await sleep(wordGap);
+        }
+      }
+    }
+
+    playBtn.addEventListener('click', async () => {
+      const text = textInput.value;
+      if (!text.trim()) {
+        statusDiv.textContent = 'Type something first.';
+        return;
+      }
+      const freq = parseFloat(freqInput.value) || 800;
+      const wpm = parseFloat(wpmInput.value) || 18;
+
+      const morse = textToMorse(text);
+      morseDiv.textContent = morse || '[No encodable characters]';
+
+      stopRequested = false;
+      playBtn.disabled = true;
+      stopBtn.disabled = false;
+      statusDiv.textContent = `Transmitting at ${freq} Hz, ~${wpm} WPM...`;
+
+      try {
+        await playMorse(morse, freq, wpm);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        playBtn.disabled = false;
+        stopBtn.disabled = true;
+        statusDiv.textContent = stopRequested ? 'Transmission stopped.' : 'Transmission complete.';
+        stopRequested = false;
+      }
+    });
+
+    stopBtn.addEventListener('click', () => {
+      stopRequested = true;
+      statusDiv.textContent = 'Stopping...';
+    });
+  </script>
+</body>
+</html>
